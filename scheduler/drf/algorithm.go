@@ -52,33 +52,70 @@ func IsFair(allUsersConsumption map[string]map[string]int64, totalResources map[
 	// Вычисляем новую доминирующую долю кандидата после добавления пода
 	newCandidateShare := CalculateNewDominantShare(candidateCurrentConsumption, candidateRequests, totalResources)
 
-	// Находим максимальную доминирующую долю среди остальных пользователей
-	maxOtherShare := 0.0
-	for user, consumption := range allUsersConsumption {
-		if user == candidateUser {
-			continue // Пропускаем самого кандидата
-		}
-		share := CalculateDominantShare(consumption, totalResources)
-		if share > maxOtherShare {
-			maxOtherShare = share
-		}
-	}
-
-	// Если нет других пользователей, всегда справедливо
-	if maxOtherShare == 0.0 {
-		return true
-	}
-
-	// Проверяем, не превысит ли кандидат максимальную долю других пользователей
-	// с учетом эпсилон (порога точности)
-	if newCandidateShare > maxOtherShare+Epsilon {
+	// Если новый пользователь становится доминирующим с долей > 1.0 (невозможно)
+	if newCandidateShare > 1.0+Epsilon {
 		return false
 	}
 
-	// Дополнительная проверка: если кандидат уже значительно превышает других,
-	// не позволяем ему увеличивать свою долю
-	currentCandidateShare := CalculateDominantShare(candidateCurrentConsumption, totalResources)
-	if currentCandidateShare > maxOtherShare+Epsilon && newCandidateShare > currentCandidateShare {
+	// Находим минимальную и максимальную доли среди всех пользователей (включая кандидата)
+	minShare := 1.0
+	maxShare := 0.0
+	totalUsers := 0
+
+	// Сначала собираем доли всех существующих пользователей (без кандидата)
+	existingShares := make(map[string]float64)
+	for user, consumption := range allUsersConsumption {
+		if user == candidateUser {
+			continue
+		}
+		share := CalculateDominantShare(consumption, totalResources)
+		existingShares[user] = share
+		if share < minShare {
+			minShare = share
+		}
+		if share > maxShare {
+			maxShare = share
+		}
+		totalUsers++
+	}
+
+	// Если нет других пользователей, всегда справедливо
+	if totalUsers == 0 {
+		return true
+	}
+
+	// Добавляем кандидата с новой долей
+	newShare := newCandidateShare
+	if newShare < minShare {
+		minShare = newShare
+	}
+	if newShare > maxShare {
+		maxShare = newShare
+	}
+
+	// DRF принцип: доли пользователей не должны отличаться более чем на epsilon
+	// Но также не должно быть ситуации, когда один пользователь может получить ресурсы,
+	// а другой нет (starvation prevention)
+
+	// Проверка: если новая доля кандидата значительно превышает минимальную долю,
+	// то это может быть несправедливо
+	if newShare > minShare+Epsilon {
+		// Дополнительная проверка: если есть пользователи с меньшей долей,
+		// и кандидат уже имеет большую долю, то не позволяем ему увеличивать
+		currentCandidateShare := CalculateDominantShare(candidateCurrentConsumption, totalResources)
+		if currentCandidateShare > minShare && newShare > currentCandidateShare {
+			return false
+		}
+	}
+
+	// Если максимальная и минимальная доли различаются больше чем на epsilon,
+	// то это нарушение
+	if maxShare-minShare > Epsilon {
+		// Но если кандидат - это пользователь с минимальной долей,
+		// то позволяем ему догнать остальных
+		if newShare <= minShare+Epsilon {
+			return true
+		}
 		return false
 	}
 
