@@ -312,6 +312,17 @@ func (cs *ClusterState) UpdateTotalResources() error {
 	return cs.updateTotalResourcesLocked()
 }
 
+// SetTotalResources устанавливает общие ресурсы кластера (используется в тестах)
+func (cs *ClusterState) SetTotalResources(resources map[string]int64) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	cs.TotalResources = make(map[string]int64)
+	for k, v := range resources {
+		cs.TotalResources[k] = v
+	}
+}
+
 // Reconcile выполняет полную синхронизацию состояния с кластером
 func (cs *ClusterState) Reconcile() error {
 	return cs.reconcile()
