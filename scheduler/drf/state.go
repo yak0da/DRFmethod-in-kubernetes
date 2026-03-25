@@ -370,3 +370,17 @@ func (cs *ClusterState) GetNodeRequestedResources(nodeName string) (map[string]i
 
 	return resources, nil
 }
+
+// GetTotalConsumption возвращает суммарное потребление всех ресурсов в кластере
+func (cs *ClusterState) GetTotalConsumption() map[string]int64 {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+
+	total := make(map[string]int64)
+	for _, consumption := range cs.Users {
+		for resType, val := range consumption {
+			total[resType] += val
+		}
+	}
+	return total
+}
