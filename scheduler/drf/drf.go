@@ -1,338 +1,232 @@
 package drf
 
 import (
-	"context"
 	"fmt"
-
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/events"
-	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
+	"sync"
 )
 
-// Имя плагина - должно совпадать с именем в scheduler-config.yaml
-const PluginName = "DRFPlugin"
-
-// DRFPlugin реализует интерфейсы Scheduler Framework
-type DRFPlugin struct {
-	clusterState  *ClusterState
-	handle        framework.Handle
-	client        kubernetes.Interface
-	eventRecorder events.EventRecorder
-	schedulerName string
+// PluginConfig содержит конфигурацию плагина
+type PluginConfig struct {
+	SchedulerName string
+	TotalCPU      int64
+	TotalMemory   int64
 }
 
-// Name возвращает имя плагина
-func (drf *DRFPlugin) Name() string {
-	return PluginName
+// DRFPluginManager управляет состоянием DRF
+type DRFPluginManager struct {
+	mu     sync.RWMutex
+	state  *ClusterState
+	config *PluginConfig
 }
 
-// New создает новый экземпляр DRFPlugin
-// Эта функция вызывается Scheduler Framework при инициализации
-func New(ctx context.Context, configuration runtime.Object, handle framework.Handle) (framework.Plugin, error) {
-	klog.Info("Initializing DRFPlugin")
-
-	// Получаем клиент Kubernetes из handle
-	clientSet, err := kubernetes.NewForConfig(handle.KubeConfig())
-	if err != nil {
-		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
+// NewDRFPluginManager создает новый менеджер DRF
+func NewDRFPluginManager(config *PluginConfig) *DRFPluginManager {
+	state := &ClusterState{
+		TotalResources: map[string]int64{
+			"cpu":    config.TotalCPU,
+			"memory": config.TotalMemory,
+		},
+		Users: make(map[string]map[string]int64),
 	}
 
-	// Имя планировщика (можно получить из конфигурации, но пока используем фиксированное)
-	schedulerName := "drf-scheduler"
-
-	// Создаем глобальное состояние с восстановлением из кластера
-	clusterState, err := NewClusterState(clientSet, schedulerName)
-	if err != nil {
-		klog.Errorf("Failed to initialize cluster state: %v", err)
-		// Не возвращаем ошибку, а создаем пустое состояние
-		clusterState = &ClusterState{
-			TotalResources: make(map[string]int64),
-			Users:          make(map[string]map[string]int64),
-		}
+	return &DRFPluginManager{
+		state:  state,
+		config: config,
 	}
-
-	// Создаем event recorder для отправки событий в Kubernetes
-	eventRecorder := handle.EventRecorder()
-
-	drf := &DRFPlugin{
-		clusterState:  clusterState,
-		handle:        handle,
-		client:        clientSet,
-		eventRecorder: eventRecorder,
-		schedulerName: schedulerName,
-	}
-
-	// Запускаем периодическую синхронизацию состояния (каждые 30 секунд)
-	go drf.periodicReconcile(ctx)
-
-	return drf, nil
 }
 
-// periodicReconcile периодически синхронизирует состояние с кластером
-func (drf *DRFPlugin) periodicReconcile(ctx context.Context) {
-	// Сначала ждем 10 секунд, чтобы планировщик полностью инициализировался
-	<-ctx.Done()
-	// В реальном коде нужно использовать time.Ticker, но для простоты оставим так
-	// При полной реализации добавить:
-	// ticker := time.NewTicker(30 * time.Second)
-	// for range ticker.C {
-	//     if err := drf.clusterState.Reconcile(); err != nil {
-	//         klog.Errorf("Failed to reconcile cluster state: %v", err)
-	//     }
-	// }
-}
+// CanSchedule проверяет, может ли под быть запланирован с точки зрения DRF
+func (m *DRFPluginManager) CanSchedule(pod PodInfo) (bool, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-// PreFilter проверяет, может ли под быть запланирован с точки зрения глобальной справедливости
-// Вызывается до основных фильтров
-func (drf *DRFPlugin) PreFilter(ctx context.Context, state *framework.CycleState, pod *corev1.Pod) (*framework.PreFilterResult, *framework.Status) {
-	klog.V(4).Infof("PreFilter: checking pod %s/%s", pod.Namespace, pod.Name)
-
-	// Получаем пользователя из метки
-	user := getUserFromPod(pod)
-
-	// Проверяем, есть ли метка user (если нет, то user = "unlabeled")
-	if user == "unlabeled" {
-		klog.V(4).Infof("Pod %s/%s has no 'user' label, will be treated as 'unlabeled'", pod.Namespace, pod.Name)
+	user := pod.User
+	if user == "" {
+		user = "unlabeled"
 	}
 
-	// Получаем запросы ресурсов пода
-	podRequests := getPodRequests(pod)
+	podRequests := pod.Requests
+
+	// Если под не запрашивает ресурсов, всегда можно запланировать
 	if len(podRequests) == 0 {
-		// Под не запрашивает ресурсов, всегда может быть запланирован
-		return nil, framework.NewStatus(framework.Success, "")
+		return true, ""
 	}
 
-	// Получаем текущее состояние
-	totalResources := drf.clusterState.GetTotalResources()
-	allUsersConsumption := drf.clusterState.GetAllUsersConsumption()
+	totalResources := m.state.GetTotalResources()
+	allUsersConsumption := m.state.GetAllUsersConsumption()
 
-	// Проверяем, не нарушит ли добавление пода принцип DRF
+	// Проверяем справедливость
 	if !IsFair(allUsersConsumption, totalResources, user, podRequests) {
-		// Создаем детальную информацию для события
-		violates, newShare, maxOther := WouldViolateFairness(allUsersConsumption, totalResources, user, podRequests)
-
+		_, newShare, maxOther := WouldViolateFairness(allUsersConsumption, totalResources, user, podRequests)
 		message := fmt.Sprintf(
 			"Would violate DRF fairness: user '%s' dominant share would become %.4f, exceeding current max of other users (%.4f)",
 			user, newShare, maxOther,
 		)
-
-		klog.V(4).Info(message)
-
-		// Создаем событие в Kubernetes
-		drf.eventRecorder.Eventf(
-			pod,
-			nil,
-			corev1.EventTypeWarning,
-			"DRFFairnessViolation",
-			"PreFilter",
-			message,
-		)
-
-		return nil, framework.NewStatus(framework.Unschedulable, message)
+		return false, message
 	}
 
-	klog.V(5).Infof("PreFilter: pod %s/%s passed fairness check for user %s", pod.Namespace, pod.Name, user)
-	return nil, framework.NewStatus(framework.Success, "")
+	return true, ""
 }
 
-// PreFilterExtensions возвращает расширения PreFilter (не используем)
-func (drf *DRFPlugin) PreFilterExtensions() framework.PreFilterExtensions {
-	return nil
-}
+// CheckNodeResources проверяет, достаточно ли ресурсов на ноде
+func (m *DRFPluginManager) CheckNodeResources(node NodeInfo, pod PodInfo) (bool, string) {
+	podRequests := pod.Requests
 
-// Filter проверяет, достаточно ли ресурсов на конкретной ноде для пода
-// Вызывается для каждой ноды после PreFilter
-func (drf *DRFPlugin) Filter(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeInfo *framework.NodeInfo) *framework.Status {
-	klog.V(5).Infof("Filter: checking node %s for pod %s/%s", nodeInfo.Node().Name, pod.Namespace, pod.Name)
-
-	// Получаем запросы ресурсов пода
-	podRequests := getPodRequests(pod)
 	if len(podRequests) == 0 {
-		// Под не запрашивает ресурсов, всегда подходит
-		return framework.NewStatus(framework.Success, "")
+		return true, ""
 	}
-
-	// Получаем доступные ресурсы на ноде
-	node := nodeInfo.Node()
-	if node == nil {
-		return framework.NewStatus(framework.Error, "node not found")
-	}
-
-	// Получаем allocatable ресурсы ноды
-	allocatable := node.Status.Allocatable
-
-	// Получаем уже запрошенные ресурсы на ноде
-	requested := nodeInfo.Requested
 
 	// Проверяем CPU
 	if cpuRequest, ok := podRequests["cpu"]; ok {
-		allocCPU := allocatable[corev1.ResourceCPU].MilliValue()
-		reqCPU := requested.MilliCPU
-
-		if reqCPU+int64(cpuRequest) > allocCPU {
-			klog.V(5).Infof("Filter: node %s insufficient CPU: requested %d, allocatable %d, need %d",
-				node.Name, reqCPU, allocCPU, cpuRequest)
-			return framework.NewStatus(framework.Unschedulable, "Insufficient CPU")
+		availableCPU := node.AllocatableCPU - node.RequestedCPU
+		if availableCPU < cpuRequest {
+			return false, fmt.Sprintf("Insufficient CPU: need %d, available %d", cpuRequest, availableCPU)
 		}
 	}
 
 	// Проверяем память
 	if memRequest, ok := podRequests["memory"]; ok {
-		allocMem := allocatable[corev1.ResourceMemory].Value()
-		reqMem := requested.Memory
-
-		if reqMem+memRequest > allocMem {
-			klog.V(5).Infof("Filter: node %s insufficient Memory: requested %d, allocatable %d, need %d",
-				node.Name, reqMem, allocMem, memRequest)
-			return framework.NewStatus(framework.Unschedulable, "Insufficient Memory")
+		availableMemory := node.AllocatableMemory - node.RequestedMemory
+		if availableMemory < memRequest {
+			return false, fmt.Sprintf("Insufficient Memory: need %d, available %d", memRequest, availableMemory)
 		}
 	}
 
-	klog.V(5).Infof("Filter: node %s passed resource check for pod %s/%s", nodeInfo.Node().Name, pod.Namespace, pod.Name)
-	return framework.NewStatus(framework.Success, "")
+	return true, ""
 }
 
-// Reserve резервирует ресурсы для пода в глобальном состоянии
-// Вызывается после успешного прохождения всех фильтров
-func (drf *DRFPlugin) Reserve(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeName string) *framework.Status {
-	klog.V(4).Infof("Reserve: reserving resources for pod %s/%s on node %s", pod.Namespace, pod.Name, nodeName)
+// ReserveResources резервирует ресурсы для пода
+func (m *DRFPluginManager) ReserveResources(pod PodInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	user := getUserFromPod(pod)
-	podRequests := getPodRequests(pod)
-
-	if len(podRequests) > 0 {
-		drf.clusterState.AddUserConsumption(user, podRequests)
-		klog.V(5).Infof("Reserve: added consumption for user %s: %v", user, podRequests)
+	user := pod.User
+	if user == "" {
+		user = "unlabeled"
 	}
 
-	return framework.NewStatus(framework.Success, "")
-}
-
-// Unreserve отменяет резервирование ресурсов
-// Вызывается, если после Reserve произошла ошибка или под был удален
-func (drf *DRFPlugin) Unreserve(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeName string) {
-	klog.V(4).Infof("Unreserve: releasing resources for pod %s/%s", pod.Namespace, pod.Name)
-
-	user := getUserFromPod(pod)
-	podRequests := getPodRequests(pod)
-
+	podRequests := pod.Requests
 	if len(podRequests) > 0 {
-		drf.clusterState.RemoveUserConsumption(user, podRequests)
-		klog.V(5).Infof("Unreserve: removed consumption for user %s: %v", user, podRequests)
+		m.state.AddUserConsumption(user, podRequests)
 	}
 }
 
-// Score оценивает ноды по критерию справедливости
-// Вызывается после Filter для всех нод, прошедших фильтрацию
-func (drf *DRFPlugin) Score(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeName string) (int64, *framework.Status) {
-	klog.V(5).Infof("Score: evaluating node %s for pod %s/%s", nodeName, pod.Namespace, pod.Name)
+// UnreserveResources отменяет резервирование ресурсов
+func (m *DRFPluginManager) UnreserveResources(pod PodInfo) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	user := getUserFromPod(pod)
-	podRequests := getPodRequests(pod)
+	user := pod.User
+	if user == "" {
+		user = "unlabeled"
+	}
+
+	podRequests := pod.Requests
+	if len(podRequests) > 0 {
+		m.state.RemoveUserConsumption(user, podRequests)
+	}
+}
+
+// ScoreNode оценивает ноду для пода
+func (m *DRFPluginManager) ScoreNode(node NodeInfo, pod PodInfo) int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	user := pod.User
+	if user == "" {
+		user = "unlabeled"
+	}
+
+	podRequests := pod.Requests
 
 	if len(podRequests) == 0 {
-		// Под без запросов ресурсов получает максимальный балл
-		return framework.MaxNodeScore, framework.NewStatus(framework.Success, "")
+		return 100
 	}
 
-	// Получаем текущее состояние
-	totalResources := drf.clusterState.GetTotalResources()
-	allUsersConsumption := drf.clusterState.GetAllUsersConsumption()
+	totalResources := m.state.GetTotalResources()
+	allUsersConsumption := m.state.GetAllUsersConsumption()
 
-	// Получаем текущую долю пользователя
-	currentShare := CalculateDominantShare(allUsersConsumption[user], totalResources)
-
-	// Вычисляем, какой станет доля после добавления пода
+	// currentShare := CalculateDominantShare(allUsersConsumption[user], totalResources)
 	newShare := CalculateNewDominantShare(allUsersConsumption[user], podRequests, totalResources)
 
-	// Получаем доли всех пользователей
 	allShares := make(map[string]float64)
 	for u, consumption := range allUsersConsumption {
 		allShares[u] = CalculateDominantShare(consumption, totalResources)
 	}
 
-	// Вычисляем текущую справедливость
 	currentFairness := CalculateFairnessScore(allShares)
 
-	// Добавляем кандидата для расчета новой справедливости
 	allSharesWithCandidate := make(map[string]float64)
 	for u, share := range allShares {
 		allSharesWithCandidate[u] = share
 	}
-	if user != "" {
-		allSharesWithCandidate[user] = newShare
-	} else {
-		allSharesWithCandidate["unlabeled"] = newShare
-	}
+	allSharesWithCandidate[user] = newShare
 
-	// Вычисляем новую справедливость
 	newFairness := CalculateFairnessScore(allSharesWithCandidate)
-
-	// Оценка: чем больше улучшение справедливости, тем выше балл
-	// Также учитываем, чтобы не превышать максимальную долю других пользователей
 	fairnessImprovement := newFairness - currentFairness
 
-	// Получаем максимальную долю других пользователей
 	maxOtherShare := 0.0
 	for u, share := range allShares {
-		if u != user {
-			if share > maxOtherShare {
-				maxOtherShare = share
-			}
+		if u != user && share > maxOtherShare {
+			maxOtherShare = share
 		}
 	}
 
-	// Штраф, если новая доля превышает максимальную долю других
 	penalty := 0.0
 	if newShare > maxOtherShare+Epsilon {
 		penalty = (newShare - maxOtherShare) * 10.0
 	}
 
-	// Итоговая оценка: от 0 до 100
-	score := (0.5 + fairnessImprovement*5.0 - penalty) * framework.MaxNodeScore
+	score := (0.5 + fairnessImprovement*5.0 - penalty) * 100
 
-	// Нормализуем оценку в диапазон [0, MaxNodeScore]
 	if score < 0 {
 		score = 0
 	}
-	if score > float64(framework.MaxNodeScore) {
-		score = float64(framework.MaxNodeScore)
+	if score > 100 {
+		score = 100
 	}
 
-	klog.V(5).Infof("Score: node %s score = %d (currentShare=%.4f, newShare=%.4f, improvement=%.4f)",
-		nodeName, int64(score), currentShare, newShare, fairnessImprovement)
-
-	return int64(score), framework.NewStatus(framework.Success, "")
+	return int64(score)
 }
 
-// ScoreExtensions возвращает расширения Score (не используем)
-func (drf *DRFPlugin) ScoreExtensions() framework.ScoreExtensions {
-	return nil
+// GetState возвращает текущее состояние (для отладки)
+func (m *DRFPluginManager) GetState() *ClusterState {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.state
 }
 
-// Bind связывает под с нодой
-// Используем стандартный биндер, но можем добавить свою логику
-func (drf *DRFPlugin) Bind(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeName string) *framework.Status {
-	klog.V(4).Infof("Bind: binding pod %s/%s to node %s", pod.Namespace, pod.Name, nodeName)
-
-	// Используем стандартный биндер
-	return drf.handle.RunBindPlugins(ctx, state, pod, nodeName)
+// PodInfo содержит информацию о поде для планирования
+type PodInfo struct {
+	Name      string
+	Namespace string
+	User      string
+	Requests  map[string]int64
 }
 
-// PostBind вызывается после успешного связывания пода
-func (drf *DRFPlugin) PostBind(ctx context.Context, state *framework.CycleState, pod *corev1.Pod, nodeName string) {
-	klog.V(4).Infof("PostBind: pod %s/%s successfully bound to node %s", pod.Namespace, pod.Name, nodeName)
+// NodeInfo содержит информацию о ноде
+type NodeInfo struct {
+	Name              string
+	AllocatableCPU    int64
+	AllocatableMemory int64
+	RequestedCPU      int64
+	RequestedMemory   int64
+}
 
-	// Создаем событие об успешном планировании
-	drf.eventRecorder.Eventf(
-		pod,
-		nil,
-		corev1.EventTypeNormal,
-		"DRFScheduled",
-		"PostBind",
-		fmt.Sprintf("Pod scheduled on node %s with DRF fairness", nodeName),
-	)
+// NewPodInfo создает PodInfo из запросов ресурсов
+func NewPodInfo(name, namespace, user string, cpu, memory int64) PodInfo {
+	requests := make(map[string]int64)
+	if cpu > 0 {
+		requests["cpu"] = cpu
+	}
+	if memory > 0 {
+		requests["memory"] = memory
+	}
+
+	return PodInfo{
+		Name:      name,
+		Namespace: namespace,
+		User:      user,
+		Requests:  requests,
+	}
 }
