@@ -4,7 +4,12 @@ import (
 	"math"
 )
 
-const Epsilon = 0.05 // 5% порог — разрешаем небольшие отклонения
+const (
+	// ShareCompareEpsilon — погрешность при сравнении доли с 1.0 (ошибки float64).
+	ShareCompareEpsilon = 1e-6
+	// Epsilon — допустимый перевес доминирующей доли кандидата над максимумом других пользователей.
+	Epsilon = 0.05
+)
 
 // CalculateDominantShare вычисляет доминирующую долю пользователя
 func CalculateDominantShare(consumed, totalResources map[string]int64) float64 {
@@ -55,8 +60,8 @@ func IsFair(allUsersConsumption map[string]map[string]int64, totalResources map[
 	// Вычисляем новую долю кандидата после добавления пода
 	newShare := CalculateNewDominantShare(candidateCurrent, candidateRequests, totalResources)
 
-	// Проверка: если новая доля превышает 1.0, всегда отклоняем
-	if newShare > 1.0+Epsilon {
+	// Физический предел кластера: доминирующая доля не может превышать 100%.
+	if newShare > 1.0+ShareCompareEpsilon {
 		return false
 	}
 
@@ -74,17 +79,8 @@ func IsFair(allUsersConsumption map[string]map[string]int64, totalResources map[
 		}
 	}
 
-	// Если нет других пользователей
+	// Нет других пользователей — ограничиваем только перегрузкой кластера (уже проверено выше).
 	if !otherUsersExist {
-		// Кандидат — существующий пользователь, проверяем, не займет ли он все ресурсы
-		if _, exists := allUsersConsumption[candidateUser]; exists {
-			// Пользователь уже есть. Проверяем, не станет ли его доля > 1.0
-			if newShare > 1.0-Epsilon {
-				return false // Нельзя занять все ресурсы, если есть место для других
-			}
-			return true
-		}
-		// Кандидат — новый пользователь, всегда можно
 		return true
 	}
 
@@ -159,18 +155,24 @@ func WouldViolateFairness(allUsersConsumption map[string]map[string]int64, total
 
 	newShare := CalculateNewDominantShare(candidateCurrent, candidateRequests, totalResources)
 
+	if newShare > 1.0+ShareCompareEpsilon {
+		return true, newShare, 0
+	}
+
 	maxOtherShare := 0.0
+	otherUsers := 0
 	for user, consumption := range allUsersConsumption {
 		if user == candidateUser {
 			continue
 		}
+		otherUsers++
 		share := CalculateDominantShare(consumption, totalResources)
 		if share > maxOtherShare {
 			maxOtherShare = share
 		}
 	}
 
-	if len(allUsersConsumption) == 0 || (len(allUsersConsumption) == 1 && allUsersConsumption[candidateUser] != nil) {
+	if otherUsers == 0 {
 		return false, newShare, maxOtherShare
 	}
 
