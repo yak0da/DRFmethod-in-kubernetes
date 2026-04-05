@@ -1,0 +1,21 @@
+# Профиль планировщика с DRF. Запуск:
+#   kube-scheduler --config=config/scheduler-config.yaml --kubeconfig=...
+# Поды должны иметь spec.schedulerName: drf-scheduler (или задать DRF_SCHEDULER_NAME под ваше имя).
+apiVersion: kubescheduler.config.k8s.io/v1
+kind: KubeSchedulerConfiguration
+profiles:
+  - schedulerName: drf-scheduler
+    plugins:
+      preFilter:
+        enabled:
+          - name: DRFPlugin
+      filter:
+        enabled:
+          - name: DRFPlugin
+      score:
+        enabled:
+          - name: DRFPlugin
+            weight: 50
+      reserve:
+        enabled:
+          - name: DRFPlugin
