@@ -34,14 +34,6 @@
 docker build -t drf-scheduler:dev .
 ```
 
-### Вариант B: Go (локальная сборка)
-
-Собрать бинарник:
-
-```bash
-go build -o drf-scheduler ./scheduler
-```
-
 ## Запуск в Kubernetes
 
 ### 1) Установить RBAC

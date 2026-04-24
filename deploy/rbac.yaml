@@ -43,3 +43,27 @@ subjects: # кому выдаём права (список субъектов)
   - kind: ServiceAccount # тип субъекта — ServiceAccount
     name: drf-scheduler # имя ServiceAccount, которому выдаём роль
     namespace: kube-system # namespace, где находится этот ServiceAccount
+--- # разделитель YAML-документов
+apiVersion: rbac.authorization.k8s.io/v1 # API-версия RBAC-объектов
+kind: Role # namespace-scoped роль (нужна для чтения ConfigMap в kube-system)
+metadata: # метаданные объекта
+  name: drf-scheduler-configmaps # имя роли
+  namespace: kube-system # Role действует только в этом namespace
+rules: # правила доступа
+  - apiGroups: [""] # core API group
+    resources: ["configmaps"] # ресурс ConfigMap
+    verbs: ["get", "list", "watch"] # чтение и watch (нужно контроллерам scheduler'а)
+--- # разделитель YAML-документов
+apiVersion: rbac.authorization.k8s.io/v1 # API-версия RBAC-объектов
+kind: RoleBinding # привязка Role к ServiceAccount в рамках namespace
+metadata: # метаданные объекта
+  name: drf-scheduler-configmaps # имя привязки
+  namespace: kube-system # namespace привязки
+roleRef: # какая роль выдаётся
+  apiGroup: rbac.authorization.k8s.io # API group роли
+  kind: Role # тип роли (namespace Role)
+  name: drf-scheduler-configmaps # имя Role выше
+subjects: # кому выдаём
+  - kind: ServiceAccount # тип субъекта
+    name: drf-scheduler # имя ServiceAccount
+    namespace: kube-system # namespace ServiceAccount
