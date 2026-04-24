@@ -1,3 +1,5 @@
+// Package drf: реализация Scheduler Framework плагина (PreFilter/Filter/Score/Reserve/Unreserve),
+// который подключается в kube-scheduler и делегирует DRF-логику менеджеру состояния.
 package drf
 
 import (

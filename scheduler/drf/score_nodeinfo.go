@@ -1,3 +1,5 @@
+// Package drf: скоринг ноды на основе scheduler snapshot (`framework.NodeInfo`),
+// чтобы использовать те же Allocatable/Requested, что и в Filter фазе.
 package drf
 
 import (
