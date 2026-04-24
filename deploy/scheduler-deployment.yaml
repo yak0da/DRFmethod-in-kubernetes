@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drf-scheduler-config
+  namespace: kube-system
+data:
+  scheduler-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    profiles:
+      - schedulerName: drf-scheduler
+        plugins:
+          preFilter:
+            enabled:
+              - name: DRFPlugin
+          filter:
+            enabled:
+              - name: DRFPlugin
+          score:
+            enabled:
+              - name: DRFPlugin
+                weight: 50
+          reserve:
+            enabled:
+              - name: DRFPlugin
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drf-scheduler
+  namespace: kube-system
+  labels:
+    app: drf-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drf-scheduler
+  template:
+    metadata:
+      labels:
+        app: drf-scheduler
+    spec:
+      serviceAccountName: drf-scheduler
+      # Чтобы планировщик мог попадать на master/control-plane node.
+      tolerations:
+        - key: "node-role.kubernetes.io/control-plane"
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "node-role.kubernetes.io/master"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: scheduler
+          image: drf-scheduler:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config=/etc/kubernetes/scheduler-config.yaml"
+            - "--v=4"
+          env:
+            # Имя планировщика, по которому DRF восстанавливает состояние (Running pods).
+            - name: DRF_SCHEDULER_NAME
+              value: "drf-scheduler"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kubernetes
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: drf-scheduler-config
+            items:
+              - key: scheduler-config.yaml
+                path: scheduler-config.yaml
