@@ -1,41 +1,45 @@
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: drf-scheduler
-  namespace: kube-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: drf-scheduler-kube-scheduler
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  # Стандартная роль kube-scheduler (нужна для list/watch множества ресурсов и bind).
-  name: system:kube-scheduler
-subjects:
-  - kind: ServiceAccount
-    name: drf-scheduler
-    namespace: kube-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: drf-scheduler-extra
-rules:
-  - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: drf-scheduler-extra
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: drf-scheduler-extra
-subjects:
-  - kind: ServiceAccount
-    name: drf-scheduler
-    namespace: kube-system
+# Этот файл выдаёт права (RBAC) кастомному планировщику `drf-scheduler`. # зачем файл нужен
+# Он создаёт ServiceAccount и привязывает к нему кластерные роли, чтобы scheduler мог читать состояние кластера и биндинговать Pod’ы на ноды. # что делает файл
+# Применение: `kubectl apply -f deploy/rbac.yaml`. # как использовать
+
+apiVersion: v1 # API-версия объекта ServiceAccount (core/v1)
+kind: ServiceAccount # создаём ServiceAccount для Pod’а планировщика
+metadata: # метаданные объекта
+  name: drf-scheduler # имя ServiceAccount (используется в Deployment как serviceAccountName)
+  namespace: kube-system # namespace, где живёт планировщик и его ServiceAccount
+--- # разделитель YAML-документов
+apiVersion: rbac.authorization.k8s.io/v1 # API-версия RBAC-объектов
+kind: ClusterRoleBinding # биндинг: привязываем кластерную роль к субъекту (ServiceAccount)
+metadata: # метаданные объекта
+  name: drf-scheduler-kube-scheduler # имя биндинга (уникально в кластере)
+roleRef: # ссылка на роль, которую выдаём
+  apiGroup: rbac.authorization.k8s.io # API group роли
+  kind: ClusterRole # тип роли (кластерная роль)
+  # Стандартная роль kube-scheduler (нужна для list/watch множества ресурсов и bind). # пояснение, почему берём именно её
+  name: system:kube-scheduler # имя встроенной ClusterRole Kubernetes для kube-scheduler
+subjects: # кому выдаём права (список субъектов)
+  - kind: ServiceAccount # тип субъекта — ServiceAccount
+    name: drf-scheduler # имя ServiceAccount, которому выдаём роль
+    namespace: kube-system # namespace, где находится этот ServiceAccount
+--- # разделитель YAML-документов
+apiVersion: rbac.authorization.k8s.io/v1 # API-версия RBAC-объектов
+kind: ClusterRole # отдельная кластерная роль с дополнительными правами (поверх system:kube-scheduler)
+metadata: # метаданные объекта
+  name: drf-scheduler-extra # имя дополнительной роли
+rules: # правила доступа (набор policy rules)
+  - apiGroups: ["storage.k8s.io"] # API group для StorageClass
+    resources: ["storageclasses"] # какие ресурсы разрешены
+    verbs: ["get", "list", "watch"] # какие операции разрешены (чтение/наблюдение)
+--- # разделитель YAML-документов
+apiVersion: rbac.authorization.k8s.io/v1 # API-версия RBAC-объектов
+kind: ClusterRoleBinding # биндинг: привязываем дополнительную роль к ServiceAccount
+metadata: # метаданные объекта
+  name: drf-scheduler-extra # имя биндинга для дополнительной роли
+roleRef: # ссылка на роль, которую выдаём
+  apiGroup: rbac.authorization.k8s.io # API group роли
+  kind: ClusterRole # тип роли (кластерная роль)
+  name: drf-scheduler-extra # имя ClusterRole, которую выдаём
+subjects: # кому выдаём права (список субъектов)
+  - kind: ServiceAccount # тип субъекта — ServiceAccount
+    name: drf-scheduler # имя ServiceAccount, которому выдаём роль
+    namespace: kube-system # namespace, где находится этот ServiceAccount

@@ -1,12 +1,16 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: drf-scheduler-config
-  namespace: kube-system
-data:
-  scheduler-config.yaml: |
-    apiVersion: kubescheduler.config.k8s.io/v1
-    kind: KubeSchedulerConfiguration
+# Этот файл деплоит кастомный планировщик `drf-scheduler` в Kubernetes. # зачем файл нужен
+# В нём: (1) ConfigMap с `KubeSchedulerConfiguration` и включённым `DRFPlugin`, (2) Deployment, который запускает контейнер с scheduler’ом и монтирует этот конфиг. # что делает файл
+# Применение: `kubectl apply -f deploy/scheduler-deployment.yaml`. # как использовать
+
+apiVersion: v1 # API-версия объекта ConfigMap (core/v1)
+kind: ConfigMap # ConfigMap хранит конфиг kube-scheduler (профиль + плагины)
+metadata: # метаданные объекта
+  name: drf-scheduler-config # имя ConfigMap (далее монтируется в Pod)
+  namespace: kube-system # namespace системных компонентов (здесь живёт scheduler)
+data: # данные ConfigMap (ключи -> значения)
+  scheduler-config.yaml: | # ключ (имя файла при монтировании) и многострочное значение (YAML kube-scheduler)
+    apiVersion: kubescheduler.config.k8s.io/v1 # API-версия KubeSchedulerConfiguration
+    kind: KubeSchedulerConfiguration # тип объекта конфигурации kube-scheduler
     profiles:
       - schedulerName: drf-scheduler
         plugins:
@@ -23,52 +27,52 @@ data:
           reserve:
             enabled:
               - name: DRFPlugin
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: drf-scheduler
-  namespace: kube-system
-  labels:
-    app: drf-scheduler
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: drf-scheduler
-  template:
-    metadata:
-      labels:
-        app: drf-scheduler
-    spec:
-      serviceAccountName: drf-scheduler
-      # Чтобы планировщик мог попадать на master/control-plane node.
-      tolerations:
-        - key: "node-role.kubernetes.io/control-plane"
-          operator: "Exists"
-          effect: "NoSchedule"
-        - key: "node-role.kubernetes.io/master"
-          operator: "Exists"
-          effect: "NoSchedule"
-      containers:
-        - name: scheduler
-          image: drf-scheduler:dev
-          imagePullPolicy: IfNotPresent
-          args:
-            - "--config=/etc/kubernetes/scheduler-config.yaml"
-            - "--v=4"
-          env:
-            # Имя планировщика, по которому DRF восстанавливает состояние (Running pods).
-            - name: DRF_SCHEDULER_NAME
-              value: "drf-scheduler"
-          volumeMounts:
-            - name: config
-              mountPath: /etc/kubernetes
-              readOnly: true
-      volumes:
-        - name: config
-          configMap:
-            name: drf-scheduler-config
-            items:
-              - key: scheduler-config.yaml
-                path: scheduler-config.yaml
+--- # разделитель YAML-документов
+apiVersion: apps/v1 # API-версия объекта Deployment
+kind: Deployment # Deployment управляет репликами Pod’ов планировщика
+metadata: # метаданные объекта
+  name: drf-scheduler # имя Deployment
+  namespace: kube-system # namespace, где запускать планировщик
+  labels: # лейблы Deployment
+    app: drf-scheduler # лейбл приложения (используется селектором/поиском Pod’ов)
+spec: # спецификация Deployment
+  replicas: 1 # число реплик планировщика (обычно 1 для кастомного scheduler’а в учебных/тестовых кластерах)
+  selector: # селектор Pod’ов, которыми управляет Deployment
+    matchLabels: # Pod должен иметь эти лейблы
+      app: drf-scheduler # значение лейбла `app`
+  template: # шаблон Pod’а
+    metadata: # метаданные Pod’а
+      labels: # лейблы Pod’а
+        app: drf-scheduler # лейбл `app`, должен совпасть с selector.matchLabels
+    spec: # спецификация Pod’а
+      serviceAccountName: drf-scheduler # ServiceAccount с RBAC (см. deploy/rbac.yaml)
+      # Чтобы планировщик мог попадать на master/control-plane node. # пояснение: tolerations позволяют запускать Pod на ноде с NoSchedule taint’ами
+      tolerations: # список tolerations (разрешения на taints)
+        - key: "node-role.kubernetes.io/control-plane" # ключ taint для control-plane нод
+          operator: "Exists" # toleration срабатывает, если taint с таким ключом существует
+          effect: "NoSchedule" # разрешаем NoSchedule taint
+        - key: "node-role.kubernetes.io/master" # ключ taint для master-ноды (старое имя в некоторых кластерах)
+          operator: "Exists" # toleration срабатывает, если taint с таким ключом существует
+          effect: "NoSchedule" # разрешаем NoSchedule taint
+      containers: # список контейнеров в Pod’е
+        - name: scheduler # имя контейнера
+          image: drf-scheduler:dev # образ планировщика (обычно собирается в minikube или пушится в registry)
+          imagePullPolicy: IfNotPresent # политика загрузки: не тянуть образ, если он уже есть на ноде
+          args: # аргументы командной строки планировщика
+            - "--config=/etc/kubernetes/scheduler-config.yaml" # путь к смонтированному конфигу kube-scheduler (из ConfigMap)
+            - "--v=4" # уровень логирования (klog verbosity)
+          env: # переменные окружения контейнера
+            # Имя планировщика, по которому DRF восстанавливает состояние (Running pods). # пояснение: используется в логике восстановления состояния
+            - name: DRF_SCHEDULER_NAME # имя переменной окружения
+              value: "drf-scheduler" # значение имени scheduler’а (должно совпадать с профилем и workload-подами)
+          volumeMounts: # монтирование volumes в контейнер
+            - name: config # имя volume (см. ниже spec.volumes)
+              mountPath: /etc/kubernetes # куда монтировать конфиг в контейнере
+              readOnly: true # монтировать только для чтения
+      volumes: # список volumes Pod’а
+        - name: config # имя volume, используемое в volumeMounts
+          configMap: # источник volume — ConfigMap
+            name: drf-scheduler-config # имя ConfigMap, который монтируем
+            items: # какие ключи ConfigMap монтировать и как назвать файлы
+              - key: scheduler-config.yaml # ключ в ConfigMap (см. data.scheduler-config.yaml)
+                path: scheduler-config.yaml # имя файла внутри директории mountPath

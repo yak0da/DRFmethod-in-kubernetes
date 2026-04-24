@@ -1,3 +1,5 @@
+// Package drf: проверка "поместится ли Pod на Node" по снапшоту NodeInfo из kube-scheduler,
+// чтобы Filter/Score опирались на согласованные данные (Allocatable/Requested).
 package drf
 
 import (
