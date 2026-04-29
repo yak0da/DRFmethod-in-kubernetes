@@ -31,6 +31,7 @@
 Собрать образ:
 
 ```bash
+& minikube -p minikube docker-env --shell powershell | Invoke-Expression
 docker build -t drf-scheduler:dev .
 ```
 
@@ -46,12 +47,14 @@ kubectl apply -f deploy/rbac.yaml
 
 ```bash
 kubectl apply -f deploy/scheduler-deployment.yaml
+kubectl -n kube-system rollout restart deploy/drf-scheduler
+kubectl -n kube-system rollout status deploy/drf-scheduler
 ```
 
 Проверить, что Pod планировщика запустился:
 
 ```bash
-kubectl -n kube-system get pods -l app=drf-scheduler
+kubectl -n kube-system get pods -l app=drf-scheduler -o wide
 kubectl -n kube-system logs deploy/drf-scheduler
 ```
 
@@ -78,39 +81,3 @@ kubectl describe pod pod-a-1
 kubectl get events --sort-by=.lastTimestamp
 kubectl -n kube-system logs deploy/drf-scheduler --tail=200
 ```
-
-## Настройка
-
-### Имя scheduler’а
-
-- В профиле scheduler’а оно задаётся в конфиге (`profiles[].schedulerName`).
-- Для восстановления состояния DRF использует переменную окружения:
-  - `DRF_SCHEDULER_NAME=drf-scheduler` (см. `deploy/scheduler-deployment.yaml`)
-
-Если вы меняете имя scheduler’а, обновите:
-
-- `config/scheduler-config.yaml` (или ConfigMap в `deploy/scheduler-deployment.yaml`)
-- `spec.schedulerName` во всех workload’ах
-- `DRF_SCHEDULER_NAME` в Deployment
-
-### “Пользователь” (fairness identity)
-
-DRF группирует потребление по `metadata.labels.user`. Если лейбл не задан — Pod попадёт в группу `"unlabeled"`.
-
-## Разработка
-
-### Локальный запуск как kube-scheduler (пример)
-
-`config/scheduler-config.yaml` содержит пример профиля. Для реального запуска вам потребуется `--kubeconfig=...` (путь зависит от окружения) и доступ к API-серверу:
-
-```bash
-./drf-scheduler --config=config/scheduler-config.yaml --v=4
-```
-
-## Деплой в прод
-
-Текущий манифест использует `image: drf-scheduler:dev` и `IfNotPresent`. Для production обычно стоит:
-
-- публиковать образ в registry и использовать версионированный tag/или digest
-- добавить `resources` (requests/limits), liveness/readiness probes и `securityContext`
-
