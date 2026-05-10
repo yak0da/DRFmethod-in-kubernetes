@@ -3,6 +3,9 @@
 # Поды должны иметь spec.schedulerName: drf-scheduler (или задать DRF_SCHEDULER_NAME под ваше имя).
 apiVersion: kubescheduler.config.k8s.io/v1
 kind: KubeSchedulerConfiguration
+# Ускорение повторных попыток планирования после Unschedulable (см. deploy/scheduler-deployment.yaml).
+podInitialBackoffSeconds: 1
+podMaxBackoffSeconds: 1
 profiles:
   - schedulerName: drf-scheduler
     plugins:

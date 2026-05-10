@@ -39,7 +39,7 @@ func NewSchedulerPlugin(_ apimachineryruntime.Object, h framework.Handle) (frame
 	if schedName == "" {
 		schedName = DefaultSchedulerName
 	}
-	mgr, err := NewDRFPluginManager(h.ClientSet(), schedName)
+	mgr, err := NewDRFPluginManager(h.ClientSet(), h.SharedInformerFactory(), schedName)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,8 @@ func (p *DRFSchedulerPlugin) Unreserve(ctx context.Context, _ *framework.CycleSt
 	p.mgr.UnreserveResources(pod)
 }
 
-// EventsToRegister помогает ставить поды обратно в очередь после изменений Pod/Node.
+// EventsToRegister: при Add/Update/Delete Pod или Node kube-scheduler снова рассматривает Pending,
+// чтобы после изменения долей (новый/удалённый под) очередь переобработалась — см. example.txt.
 func (p *DRFSchedulerPlugin) EventsToRegister() []framework.ClusterEventWithHint {
 	return []framework.ClusterEventWithHint{
 		{Event: framework.ClusterEvent{Resource: framework.Pod, ActionType: framework.Add | framework.Delete | framework.Update}},

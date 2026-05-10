@@ -1,0 +1,17 @@
+# Второй под alpha как a1 — после 01+02 ожидается Pending (DRF gate).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: drf-demo-a2
+  namespace: drf-reconcile-demo
+  labels:
+    user: alpha
+spec:
+  schedulerName: drf-scheduler
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.9
+      resources:
+        requests:
+          cpu: 100m
+          memory: 3000Mi

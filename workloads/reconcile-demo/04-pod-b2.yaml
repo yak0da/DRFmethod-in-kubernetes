@@ -1,0 +1,17 @@
+# Второй beta — усиливает доминирующую долю beta по CPU; затем a2 может запланироваться.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: drf-demo-b2
+  namespace: drf-reconcile-demo
+  labels:
+    user: beta
+spec:
+  schedulerName: drf-scheduler
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.9
+      resources:
+        requests:
+          cpu: 1200m
+          memory: 128Mi

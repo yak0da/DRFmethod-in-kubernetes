@@ -5,9 +5,12 @@ package drf
 import (
 	"fmt"
 	"math"
+	"strings"
 	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 )
@@ -18,12 +21,15 @@ type DRFPluginManager struct {
 	state *ClusterState
 }
 
-// NewDRFPluginManager создаёт менеджер с состоянием из API (тоталы с нод, Users из Running).
-func NewDRFPluginManager(client kubernetes.Interface, schedulerName string) (*DRFPluginManager, error) {
+// NewDRFPluginManager создаёт менеджер с состоянием из API (тоталы с нод, Users из подов с nodeName).
+// factory — SharedInformerFactory kube-scheduler; подписка обновляет состояние при изменениях кластера,
+// чтобы после добавления/удаления чужих подов Pending снова проходили DRF-гейт с актуальными долями.
+func NewDRFPluginManager(client kubernetes.Interface, factory informers.SharedInformerFactory, schedulerName string) (*DRFPluginManager, error) {
 	state, err := NewClusterState(client, schedulerName)
 	if err != nil {
 		return nil, err
 	}
+	startDRFClusterSync(state, schedulerName, factory)
 	return &DRFPluginManager{state: state}, nil
 }
 
@@ -33,6 +39,41 @@ func NewDRFPluginManager(client kubernetes.Interface, schedulerName string) (*DR
 // pod допускается, если у его пользователя текущая доминирующая доля меньше максимальной
 // доминирующей доли среди пользователей; если доли всех пользователей равны — pod допускается.
 func (m *DRFPluginManager) CanSchedule(pod *corev1.Pod) (bool, string) {
+	// Короткий цикл: длинный PreFilter блокирует весь kube-scheduler (один под за цикл из activeQ).
+	const (
+		maxSettleAttempts = 4
+		settleDelay       = 20 * time.Millisecond
+	)
+
+	var lastMsg string
+	for attempt := 0; attempt < maxSettleAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(settleDelay)
+		}
+
+		// Полная синхронизация с API перед решением PreFilter.
+		if err := m.state.Reconcile(); err != nil {
+			klog.Warningf("DRF: cluster state reconcile failed, using last known state: %v", err)
+		}
+
+		ok, msg := m.evaluateFairnessLocked(pod)
+		if ok {
+			return true, ""
+		}
+		lastMsg = msg
+		// Повторяем только если упёрлись в DRF gate: только что запланированный под мог ещё не попасть
+		// в ответ List("") на этом же тике — иначе получаются десятки отказов подряд и минуты задержки
+		// из‑за backoff очереди (не путать с podMaxBackoffSeconds в YAML).
+		if !strings.Contains(msg, "DRF gate:") {
+			return false, msg
+		}
+	}
+
+	return false, lastMsg
+}
+
+// evaluateFairnessLocked — проверка лимитов и DRF; вызывать после свежего Reconcile().
+func (m *DRFPluginManager) evaluateFairnessLocked(pod *corev1.Pod) (bool, string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -60,9 +101,6 @@ func (m *DRFPluginManager) CanSchedule(pod *corev1.Pod) (bool, string) {
 		}
 	}
 
-	// DRF допуск по текущим доминирующим долям пользователей (без "newShare").
-	//
-	// 1) Считаем текущие dominant shares всех известных пользователей.
 	shares := make(map[string]float64, len(allUsersConsumption)+1)
 	maxShare := 0.0
 	for u, consumption := range allUsersConsumption {
@@ -72,14 +110,12 @@ func (m *DRFPluginManager) CanSchedule(pod *corev1.Pod) (bool, string) {
 			maxShare = s
 		}
 	}
-	// 2) Кандидат должен участвовать в сравнении даже если у него пока 0 потребления.
 	candidateShare := shares[user]
 	if _, ok := shares[user]; !ok {
 		candidateShare = 0.0
 		shares[user] = 0.0
 	}
 
-	// 3) Проверка "все равны" (с небольшой погрешностью).
 	allEqual := true
 	for _, s := range shares {
 		if math.Abs(s-maxShare) > ShareCompareEpsilon {
@@ -91,8 +127,6 @@ func (m *DRFPluginManager) CanSchedule(pod *corev1.Pod) (bool, string) {
 		return true, ""
 	}
 
-	// 4) Основное правило допуска из описания: доля кандидата должна быть меньше максимальной.
-	// Если кандидат уже на максимуме (в т.ч. равен максимуму), он ждёт в очереди.
 	if !(candidateShare < maxShare) {
 		return false, fmt.Sprintf(
 			"DRF gate: user %q dominant share %.4f is not less than current max %.4f",
@@ -103,31 +137,12 @@ func (m *DRFPluginManager) CanSchedule(pod *corev1.Pod) (bool, string) {
 	return true, ""
 }
 
-// ReserveResources фиксирует потребление пользователя (пара к UnreserveResources).
-func (m *DRFPluginManager) ReserveResources(pod *corev1.Pod) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// ReserveResources / UnreserveResources — раньше дублировали учёт в ClusterState; теперь CanSchedule
+// пересчитывает потребление из API (reconcile), иначе при удалении пода оставались «мёртвые» increment’ы
+// (Unreserve при удалении уже привязанного пода не вызывается). Оставляем хуки для совместимости с профилем.
+func (m *DRFPluginManager) ReserveResources(pod *corev1.Pod) {}
 
-	user := getUserFromPod(pod)
-	podRequests := getPodRequests(pod)
-	if len(podRequests) > 0 {
-		m.state.AddUserConsumption(user, podRequests)
-		klog.V(4).Infof("Reserved resources for user %s: %v", user, podRequests)
-	}
-}
-
-// UnreserveResources откатывает ReserveResources.
-func (m *DRFPluginManager) UnreserveResources(pod *corev1.Pod) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	user := getUserFromPod(pod)
-	podRequests := getPodRequests(pod)
-	if len(podRequests) > 0 {
-		m.state.RemoveUserConsumption(user, podRequests)
-		klog.V(4).Infof("Unreserved resources for user %s: %v", user, podRequests)
-	}
-}
+func (m *DRFPluginManager) UnreserveResources(pod *corev1.Pod) {}
 
 // computeNodeScore — скоринг ноды по headroom (остаток ресурсов на ноде после размещения пода).
 func (m *DRFPluginManager) computeNodeScore(pod *corev1.Pod, podRequests map[string]int64, allocCPU, allocMem, usedCPU, usedMem int64) int64 {

@@ -1,0 +1,17 @@
+# Alpha: высокая доля по памяти (под minikube 4 CPU / ~7930M — см. README).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: drf-demo-a1
+  namespace: drf-reconcile-demo
+  labels:
+    user: alpha
+spec:
+  schedulerName: drf-scheduler
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.9
+      resources:
+        requests:
+          cpu: 100m
+          memory: 3000Mi

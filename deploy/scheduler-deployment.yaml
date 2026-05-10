@@ -11,6 +11,9 @@ data: # данные ConfigMap (ключи -> значения)
   scheduler-config.yaml: | # ключ (имя файла при монтировании) и многострочное значение (YAML kube-scheduler)
     apiVersion: kubescheduler.config.k8s.io/v1 # API-версия KubeSchedulerConfiguration
     kind: KubeSchedulerConfiguration # тип объекта конфигурации kube-scheduler
+    # Интервал backoff между попытками schedule (не то же самое, что --pod-max-in-unschedulable-pods-duration).
+    podInitialBackoffSeconds: 1
+    podMaxBackoffSeconds: 1
     profiles:
       - schedulerName: drf-scheduler
         plugins:
@@ -60,6 +63,8 @@ spec: # спецификация Deployment
           imagePullPolicy: IfNotPresent # политика загрузки: не тянуть образ, если он уже есть на ноде
           args: # аргументы командной строки планировщика
             - "--config=/etc/kubernetes/scheduler-config.yaml" # путь к смонтированному конфигу kube-scheduler (из ConfigMap)
+            # Не путать с podMaxBackoffSeconds в YAML: это отдельный таймер «сколько под может лежать в unschedulable» (дефолт kube-scheduler — 5m).
+            - "--pod-max-in-unschedulable-pods-duration=30s"
             - "--v=4" # уровень логирования (klog verbosity)
           env: # переменные окружения контейнера
             # Имя планировщика, по которому DRF восстанавливает состояние (Running pods). # пояснение: используется в логике восстановления состояния

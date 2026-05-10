@@ -105,11 +105,17 @@ func (cs *ClusterState) rebuildUserConsumptionLocked() error {
 	}
 
 	for _, pod := range pods.Items {
-		// Фильтруем: только поды, запланированные нашим планировщиком и находящиеся в статусе Running
+		// Только наши поды, уже назначенные на ноду (тогда requests учитываются в ёмкости кластера).
+		// Учитываем Pending с nodeName (образ качается) и Running. Succeeded/Failed и поды без nodeName не
+		// тратят квоту в этой модели. Раньше учитывали только Running + дополняли Reserve, но при удалении
+		// пода kube-scheduler не вызывает Unreserve — в памяти оставалась «зависшая» учётка; источник истины — API.
 		if pod.Spec.SchedulerName != cs.schedulerName {
 			continue
 		}
-		if pod.Status.Phase != corev1.PodRunning {
+		if pod.Spec.NodeName == "" {
+			continue
+		}
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			continue
 		}
 
